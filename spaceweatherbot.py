@@ -289,15 +289,43 @@ class FlareBot(discord.Client):
     @tasks.loop(minutes=10)
     async def status_task(self):
         try:
+            # Get latest flare
             flare = await fetch_latest_flare()
-            if flare and flare.get("current_class"):
-                class_str = flare.get("current_class", "None")
-                text = f"Flare: {class_str}"
-            else:
-                text = "Solar flares"
+            flare_class = "None"
+            if flare:
+                flare_class = flare.get("max_class") or flare.get("current_class", "None")
+            
+            # Get forecast for next 24 hours
+            forecast_data = await fetch_flare_forecast()
+            m_chance = 0
+            x_chance = 0
+            if forecast_data and len(forecast_data) > 0:
+                latest_forecast = forecast_data[0]
+                m_chance = latest_forecast.get("m_class_1_day", 0)
+                x_chance = latest_forecast.get("x_class_1_day", 0)
+            
+            # Format status text (Discord limit is 128 chars)
+            text = f"Current Flare: {flare_class} | M: {m_chance}% | X: {x_chance}%"
+            
+            # Truncate if too long
+            if len(text) > 128:
+                # Try shorter version
+                text = f"Flare: {flare_class} | M: {m_chance}% | X: {x_chance}%"
+                if len(text) > 128:
+                    # Even shorter
+                    text = f"{flare_class} | M:{m_chance}% X:{x_chance}%"
+                    if len(text) > 128:
+                        # Fallback to just flare class
+                        text = f"Flare: {flare_class}"
+            
             await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=text))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"status_task error: {e}")
+            # Fallback to simple status
+            try:
+                await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Solar flares"))
+            except:
+                pass
 
     # --- real-time flare polling ---
     @tasks.loop(seconds=CHECK_INTERVAL_SEC)
