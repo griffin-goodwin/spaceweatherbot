@@ -305,7 +305,7 @@ class FlareBot(discord.Client):
                 x_chance = latest_forecast.get("x_class_1_day", 0)
             
             # Format status text (Discord limit is 128 chars)
-            text = f"Current Flare: {flare_class} | M: {m_chance}% | X: {x_chance}%"
+            text = f"Current Flare Class: {flare_class} | M: {m_chance}% | X: {x_chance}%"
             
             # Truncate if too long
             if len(text) > 128:
@@ -382,7 +382,7 @@ class FlareBot(discord.Client):
             now_est = now_utc.astimezone(est_tz)
             
             # Check if it's 5pm EST/EDT (17:00)
-            if now_est.hour == 13 and now_est.minute < 5:
+            if now_est.hour == 17 and now_est.minute < 5:
                 today = now_est.strftime("%Y-%m-%d")
                 
                 # Only send once per day
@@ -655,6 +655,52 @@ async def build_daily_summary_embed(date_est: datetime) -> discord.Embed:
             except:
                 pass
     
+    # Extract all flare events from today's alerts
+    today_flare_events = []
+    import re
+    for alert in today_alerts:
+        msg = alert.get("message") or alert.get("summary") or alert.get("product_text") or ""
+        issued = alert.get("issue_datetime") or alert.get("time_tag") or alert.get("timestamp")
+        
+        # Try multiple patterns to extract flare class from alert message
+        # Pattern 1: "M2.5", "X1.0", "C3.2" with optional "class" or "flare" after
+        flare_match = re.search(r'\b([MXCB])\s*(\d+(?:\.\d+)?)\s*(?:class|flare|event)?', msg, re.IGNORECASE)
+        if not flare_match:
+            # Pattern 2: "M-class", "X-class" followed by number
+            flare_match = re.search(r'\b([MXCB])-?class\s*(\d+(?:\.\d+)?)', msg, re.IGNORECASE)
+        if not flare_match:
+            # Pattern 3: Just "M2.5" or "X1" standalone
+            flare_match = re.search(r'\b([MXCB])(\d+(?:\.\d+)?)\b', msg, re.IGNORECASE)
+        
+        if flare_match:
+            flare_class = flare_match.group(1).upper() + flare_match.group(2)
+            # Only add if it's a valid flare class (not just a letter)
+            if len(flare_class) > 1:
+                today_flare_events.append({
+                    "class": flare_class,
+                    "time": format_time_est(str(issued)) if issued else "Unknown",
+                    "alert_type": alert.get("message_type") or alert.get("type", "Alert")
+                })
+    
+    # Also add the latest flare if it happened today and not already in alerts
+    if today_flare:
+        flare_class = today_flare.get("max_class") or today_flare.get("current_class", "Unknown")
+        flare_time = format_time_est(today_flare.get("max_time") or today_flare.get("time_tag", ""))
+        
+        # Check if this flare is already in the events list
+        already_listed = False
+        for event in today_flare_events:
+            if event.get("class") == flare_class and event.get("time") == flare_time:
+                already_listed = True
+                break
+        
+        if not already_listed:
+            today_flare_events.append({
+                "class": flare_class,
+                "time": flare_time,
+                "alert_type": "Latest Detection"
+            })
+    
     # Build embed
     embed = discord.Embed(
         title=f"📊 Daily Solar Flare Summary - {date_display}",
@@ -678,25 +724,60 @@ async def build_daily_summary_embed(date_est: datetime) -> discord.Embed:
     else:
         embed.add_field(name="📈 Forecast Probabilities", value="No forecast data available", inline=False)
     
-    # Add today's flare event
-    if today_flare:
-        flare_class = today_flare.get("max_class") or today_flare.get("current_class", "Unknown")
-        flare_time = format_time_est(today_flare.get("max_time") or today_flare.get("time_tag", ""))
-        class_letter, _ = parse_flare_class(flare_class)
-        if class_letter == "X":
-            flare_emoji = "🚨"
-        elif class_letter == "M":
-            flare_emoji = "⚠️"
+    # Add today's flare events (all of them)
+    if today_flare_events:
+        # Sort by class (X first, then M, then C, then B)
+        def sort_key(event):
+            class_letter, class_num = parse_flare_class(event.get("class", ""))
+            if class_letter == "X":
+                return (0, class_num or 0)
+            elif class_letter == "M":
+                return (1, class_num or 0)
+            elif class_letter == "C":
+                return (2, class_num or 0)
+            else:
+                return (3, class_num or 0)
+        
+        today_flare_events.sort(key=sort_key, reverse=True)
+        
+        # Build the events text
+        events_text = ""
+        for i, event in enumerate(today_flare_events, 1):
+            flare_class = event.get("class", "Unknown")
+            event_time = event.get("time", "Unknown")
+            alert_type = event.get("alert_type", "")
+            
+            class_letter, _ = parse_flare_class(flare_class)
+            if class_letter == "X":
+                emoji = "🚨"
+            elif class_letter == "M":
+                emoji = "⚠️"
+            elif class_letter == "C":
+                emoji = "⚡"
+            else:
+                emoji = "•"
+            
+            events_text += f"{emoji} **{flare_class}** - {event_time}"
+            if alert_type and alert_type != "Latest Detection":
+                events_text += f" ({alert_type})"
+            events_text += "\n"
+        
+        # Determine emoji for field name based on highest class
+        highest_class_letter, _ = parse_flare_class(today_flare_events[0].get("class", ""))
+        if highest_class_letter == "X":
+            field_emoji = "🚨"
+        elif highest_class_letter == "M":
+            field_emoji = "⚠️"
         else:
-            flare_emoji = "⚡"
+            field_emoji = "⚡"
         
         embed.add_field(
-            name=f"{flare_emoji} Today's Flare Event",
-            value=f"**Class:** {flare_class}\n**Peak Time:** {flare_time}",
+            name=f"{field_emoji} Today's Flare Events ({len(today_flare_events)})",
+            value=events_text,
             inline=False
         )
     else:
-        embed.add_field(name="⚡ Today's Flare Event", value="No significant flares detected today", inline=False)
+        embed.add_field(name="⚡ Today's Flare Events", value="No flares detected today", inline=False)
     
     # Add today's alerts
     if today_alerts:
